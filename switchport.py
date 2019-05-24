@@ -166,7 +166,11 @@ class SwitchPort(object):
         for mac in self._active_fdb.keys():
             candidate_entry = candidate.get(mac, None)
             if candidate_entry is None:
-                 to_del.append(mac)
+                 # there is no MAC routing entry towards our own phys port
+                 # easiest check is "is there a valid gate"
+                p_g = self._p_to_g(self._active_fdb[mac]["ifname"])
+                if p_g is not None:
+                    to_del.append(mac)
             elif not candidate_entry["islocal"]:
                 # MAC migration to a different port and MAC expiry
                 if candidate_entry["ifname"] != self._active_fdb[mac]["ifname"] and \
