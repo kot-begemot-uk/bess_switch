@@ -61,7 +61,10 @@ class SwitchPort(object):
     def _hout_port(self, port):
         '''Return the expected out port or None if it is not a BESS port'''
         try:
-            return "houtbv{}p{}".format(self._vlan.vlan_no, PORT_RE.match(port).group(2))
+            out_port = "houtbv{}p{}".format(self._vlan.vlan_no, PORT_RE.match(port).group(2))
+            if out_port == "hout{}".format(self.port_name):
+                return None # do not loop traffic
+            return out_port
         except TypeError:
             logging.debug("No matching gate for port %s", port)
             return None
@@ -71,11 +74,14 @@ class SwitchPort(object):
         candidate = self._hout_port(port)
         if candidate is None:
             return None
+        hout_port = self._hout_port(port)
+        if hout_port is None:
+            return None
         maxgate = max(self._pg_map.values()) + 1
         self._pg_map[port] = maxgate
         logging.debug("Wiring %s to gate %d on port %s", port, maxgate, self.port_name)
         self._bess.connect_modules(
-            "f{}".format(self.port_name), self._hout_port(port), ogate=maxgate)
+            "f{}".format(self.port_name), hout_port, ogate=maxgate)
         return maxgate
 
     def _p_to_g(self, port):
@@ -167,13 +173,17 @@ class SwitchPort(object):
                     PORT_RE.match(candidate_entry["ifname"]) is not None:
                     # we delete the rule if it is expired in the slow
                     # path fdb or if it has moved
-                    to_add.append({"addr":mac, "gate":self._p_to_g(candidate_entry["ifname"])})
+                    p_g = self._p_to_g(candidate_entry["ifname"])
+                    if p_g is not None:
+                        to_add.append({"addr":mac, "gate":p_g})
 
         for mac in candidate.keys():
             # unconditionally add anything which is not in the active fdb
             if (self._active_fdb.get(mac) is None) and (not candidate[mac]["islocal"]) and \
                 PORT_RE.match(candidate[mac]["ifname"]) is not None:
-                to_add.append({"addr":mac, "gate":self._p_to_g(candidate[mac]["ifname"])})
+                p_g = self._p_to_g(candidate[mac]["ifname"])
+                if p_g is not None:
+                    to_add.append({"addr":mac, "gate":p_g})
 
         if len(to_del) > 0:
             logging.debug("Deleting on %s %s", self.port_name, to_del)
