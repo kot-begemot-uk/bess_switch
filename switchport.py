@@ -139,7 +139,7 @@ class SwitchPort(object):
         if len(mac_list) > 0:
             self._bess.run_module_command(
                 "f{}".format(self.port_name),
-                "del",
+                "delete",
                 "L2ForwardCommandAddArg",
                 {"addrs":mac_list})
 
