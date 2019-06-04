@@ -45,9 +45,16 @@ class Switch(object):
         '''Netlink listener loop'''
         messages = self._fdb.initial_read()
         while True:
+            req_queue = {}
             for (event, vindex, data) in messages:
                 target_vlan = self._ifindexes[vindex]
-                target_vlan.update_fdb([(event, self._ifindexes[data['port']], data['addr'])])
+                try:
+                    req_queue[target_vlan].append((event, self._ifindexes[data['port']], data['addr']))
+                except KeyError:
+                    req_queue[target_vlan] = [(event, self._ifindexes[data['port']], data['addr'])]
+            for (vlan, changes) in  req_queue.items():
+                vlan.update_fdb(changes)
+
             messages = self._fdb.iteration()
 
 def main():
