@@ -163,6 +163,8 @@ class SwitchPort(object):
         to_del = []
         to_add = []
 
+        logging.debug("Got requests on port %s %s", self.port_name, changes)
+
         for (oper, port, mac) in changes:
             if oper == 'RTM_NEWNEIGH' and port != self:
                 p_g = self._p_to_g(port.port_name)
