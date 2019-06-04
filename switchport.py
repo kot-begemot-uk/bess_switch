@@ -142,7 +142,7 @@ class SwitchPort(object):
 
     def _del_rules(self, mac_list):
         '''Del MAC-GATE Rules'''
-        if len(mac_list) > 0:
+        if mac_list:
             self._bess.run_module_command(
                 "f{}".format(self.port_name),
                 "delete",
@@ -151,49 +151,38 @@ class SwitchPort(object):
 
     def _add_rules(self, entries):
         '''Add MAC-GATE Rules'''
-        if len(entries) > 0:
+        if entries:
             self._bess.run_module_command(
                 "f{}".format(self.port_name),
                 "add",
                 "L2ForwardCommandAddArg",
                 {"entries":entries})
 
-    def update_fdb(self, candidate):
+    def update_fdb(self, changes):
         '''Apply Forwarding Database rules'''
         to_del = []
         to_add = []
 
-        for mac in self._active_fdb.keys():
-            candidate_entry = candidate.get(mac, None)
-            if candidate_entry is None:
-                 # there is no MAC routing entry towards our own phys port
-                 # easiest check is "is there a valid gate"
-                p_g = self._p_to_g(self._active_fdb[mac]["ifname"])
-                if p_g is not None:
-                    to_del.append(mac)
-            elif not candidate_entry["islocal"]:
-                # MAC migration to a different port and MAC expiry
-                if candidate_entry["ifname"] != self._active_fdb[mac]["ifname"] and \
-                    PORT_RE.match(candidate_entry["ifname"]) is not None:
-                    # we delete the rule if it is expired in the slow
-                    # path fdb or if it has moved
-                    p_g = self._p_to_g(candidate_entry["ifname"])
-                    if p_g is not None:
-                        to_add.append({"addr":mac, "gate":p_g})
-
-        for mac in candidate.keys():
-            # unconditionally add anything which is not in the active fdb
-            if (self._active_fdb.get(mac) is None) and (not candidate[mac]["islocal"]) and \
-                PORT_RE.match(candidate[mac]["ifname"]) is not None:
-                p_g = self._p_to_g(candidate[mac]["ifname"])
+        for (oper, port, mac) in changes:
+            if oper == 'RTM_NEWNEIGH' and port != self:
+                p_g = self._p_to_g(port.port_name)
                 if p_g is not None:
                     to_add.append({"addr":mac, "gate":p_g})
-
-        if len(to_del) > 0:
-            logging.debug("Deleting on %s %s", self.port_name, to_del)
-            self._del_rules(to_del)
-        if len(to_add) > 0:
-            logging.debug("Adding on %s %s", self.port_name, to_add)
-            self._add_rules(to_add)
-
-        self._active_fdb = candidate
+            if oper == 'RTM_DELNEIGH':
+                p_g = self._p_to_g(port.port_name)
+                if p_g is not None:
+                    to_del.append(mac)
+        try:
+            if to_del:
+                logging.debug("Deleting on %s %s", self.port_name, to_del)
+                self._del_rules(to_del)
+        except:
+            logging.error("Bess rejected deletion, MAC not in table")
+                
+            
+        try:
+            if to_add:
+                logging.debug("Adding on %s %s", self.port_name, to_add)
+                self._add_rules(to_add)
+        except:
+            logging.error("Bess rejected addition, MAC already in table")

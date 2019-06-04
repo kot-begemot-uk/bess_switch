@@ -8,10 +8,10 @@
 
 import logging
 import json
-import time
 from argparse import ArgumentParser
-from vlan import Vlan
 from pybess.bess import BESS
+from netlink_listener import FDB
+from vlan import Vlan
 
 class Switch(object):
     '''A python representation of a BESS vlan'''
@@ -19,8 +19,9 @@ class Switch(object):
     def __init__(self, bess):
         self._bess = bess
         self._vlans = []
+        self._ifindexes = {}
         self._initialized = False
-        self._fdb = None
+        self._fdb = FDB()
 
     def deserialize(self, config):
         '''Digest data read from JSON'''
@@ -34,12 +35,20 @@ class Switch(object):
             self._initialized = True
             for vlan in self._vlans:
                 vlan.initialize()
+                self._ifindexes[self._fdb.lookup(vlan.ifname())] = vlan
+                for port in vlan.ports():
+                    self._ifindexes[self._fdb.lookup(port.port_name)] = port
         except IOError:
             self._initialized = False
 
-    def update_fdb(self):
-        for vlan in self._vlans:
-            vlan.update_fdb()
+    def main_loop(self):
+        '''Netlink listener loop'''
+        messages = self._fdb.initial_read()
+        while True:
+            for (event, vindex, data) in messages:
+                target_vlan = self._ifindexes[vindex]
+                target_vlan.update_fdb([(event, self._ifindexes[data['port']], data['addr'])])
+            messages = self._fdb.iteration()
 
 def main():
     '''Main Subroutine'''
@@ -70,12 +79,9 @@ def main():
     logging.debug("Fire at will")
     bess.resume_all()
     try:
-        while True:
-            switch.update_fdb()
-            time.sleep(1)
+        switch.main_loop()
     except KeyboardInterrupt:
         pass
-            
 
 if __name__ == '__main__':
     main()
