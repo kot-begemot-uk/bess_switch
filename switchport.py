@@ -127,7 +127,7 @@ class SwitchPort(object):
             v_out = self._bess.create_module(
                 "PortOut", "vout{}".format(self.port_name), {"port": "v{}".format(self.port_name)})
             forwarder = self._bess.create_module(
-                "L2Forward", "f{}".format(self.port_name), {})
+                "L2Forward", "f{}".format(self.port_name), {"source_check": True})
 
             self._bess.run_module_command(
                 forwarder.name,
@@ -158,6 +158,30 @@ class SwitchPort(object):
                 "L2ForwardCommandAddArg",
                 {"entries":entries})
 
+    def _slow_del(self, entries):
+        '''Slow addition, one entry at a time to fix inconsistencies
+           in the fdb'''
+        for entry in entries:
+            logging.debug("Slow deletion for %s", entry)
+            try:
+                self._del_rules(entry)
+            except:
+                pass
+
+    def _slow_add(self, entries):
+        '''Slow addition, one entry at a time to fix inconsistencies
+           in the fdb'''
+        for entry in entries:
+            logging.debug("Slow addition for %s", entry)
+            try:
+                self._del_rules([entry["addr"]])
+            except:
+                pass
+            try:
+                self._add_rules([entry])
+            except:
+                logging.error("Slow addition for %s failed", entry)
+
     def update_fdb(self, changes):
         '''Apply Forwarding Database rules'''
         to_del = []
@@ -170,6 +194,9 @@ class SwitchPort(object):
                 p_g = self._p_to_g(port.port_name)
                 if p_g is not None:
                     to_add.append({"addr":mac, "gate":p_g})
+            if oper == 'RTM_NEWNEIGH' and port == self:
+                 to_del.append(mac) # Mac has jumped, we must delete our entry if exists
+                
             if oper == 'RTM_DELNEIGH':
                 p_g = self._p_to_g(port.port_name)
                 if p_g is not None:
@@ -179,7 +206,7 @@ class SwitchPort(object):
                 logging.debug("Deleting on %s %s", self.port_name, to_del)
                 self._del_rules(to_del)
         except:
-            logging.error("Bess rejected deletion, MAC not in table")
+            self._slow_del(to_del)
                 
             
         try:
@@ -187,4 +214,4 @@ class SwitchPort(object):
                 logging.debug("Adding on %s %s", self.port_name, to_add)
                 self._add_rules(to_add)
         except:
-            logging.error("Bess rejected addition, MAC already in table")
+            self._slow_add(to_add)
