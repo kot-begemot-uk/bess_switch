@@ -1,12 +1,14 @@
 #!/usr/bin/python
 
-'''Switch Vlan Module for a BESS based switch'''
+'''Netlink Listener for a Bess switch'''
 
 # Copyright (c) 2019 Red Hat Inc
 #
 # License: GPL2, see COPYING in source directory
 
 import logging
+import time
+import socket
 from pyroute2 import IPRoute
 from pyroute2.config import AF_BRIDGE
 
@@ -15,18 +17,35 @@ NUD_STALE = 0x4
 NUD_PERMANENT = 0x80
 NUD_MASK = (NUD_REACHABLE | NUD_STALE)
 
-class FDB(object):
-    '''A python representation of the linux bridge forwarding
-       database. By default reads from sysfs and expects a linux
-       bridge instance. Read methods can be overriden to support
-       other backends.'''
+DEFAULT_AGE = 300
 
+
+class NetlinkFeed(object):
     def __init__(self):
         self._ipr = IPRoute()
         self._ipr.bind()
+        self._index_to_name = {}
+        self.rebuild_index()
 
-    @staticmethod
-    def _parse(mess):
+    def rebuild_index(self):
+        '''Rebuild index to name hash'''
+        self._index_to_name = {}
+        for iface in self._ipr.get_links('all'):
+            index = iface["index"]
+            for (attr, value) in iface["attrs"]:
+                if attr == 'IFLA_IFNAME':
+                    self._index_to_name[index] = value
+                    break
+
+    def fileno(self):
+        '''File descriptor for epoll loop'''
+        return self._ipr.fileno()
+        
+    def setblocking(self, arg):
+        '''Set blocking/non-blocking'''
+        return self._ipr.setblocking(arg)
+
+    def _parse(self, mess):
         '''Parse a Bridge Netlink message'''
         if mess["state"] & NUD_PERMANENT:
             # we do not deal with any permanent entries for now
@@ -40,9 +59,9 @@ class FDB(object):
             elif name == 'NDA_MASTER':
                 bridge = value
         if bridge is None or mac is None or port is None:
-            logging.debug("Failed to parse message %s", mess)
+            logging.error("Failed to parse message %s", mess)
             raise KeyError
-        return (mess["event"], bridge, {"addr":mac, "port":port})
+        return {"type":mess["event"], "bridge":bridge, "mac":mac, "port":port}
 
     def initial_read(self):
         '''Read the FDB state at start'''
@@ -58,7 +77,10 @@ class FDB(object):
     def iteration(self):
         '''Handle Netlink messages'''
         execute = []
-        messages = self._ipr.get()
+        try:
+            messages = self._ipr.get()
+        except socket.error:
+            return
         for mess in messages:
             try:
                 if mess["family"] == AF_BRIDGE and (mess["state"] & NUD_MASK):
@@ -67,6 +89,10 @@ class FDB(object):
                 pass
         return execute
 
-    def lookup(self, name):
+    def lookup_by_name(self, name):
         '''Lookup the index of an interface'''
         return self._ipr.link_lookup(ifname=name)[0]
+
+    def lookup_by_index(self, index):
+        '''Lookup the index of an interface'''
+        return self._index_to_name[index]

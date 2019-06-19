@@ -16,35 +16,38 @@ class Vlan(object):
     def __init__(self, bess, config=None):
         self.vlan_no = None
         self._bess = bess
-        self._ports = []
-        self._replicators = {} # hashed by MAC address
+        self._p_by_name = {}
         self._initialized = False
         if config is not None:
             self.deserialize(config)
-        self._fdb = None
 
     def ifname(self):
         '''Build default interface name'''
         return "bvlan{}".format(self.vlan_no)
 
+    @property
     def ports(self):
         '''Accessor for port list'''
-        return self._ports
+        return self._p_by_name.values()
+
+    def port_by_name(self, name):
+        '''Return port by its name'''
+        return self._p_by_name[name]
 
     def serialize(self):
         '''Prep the vlan for json store'''
-        ser_ports = []
-        for port in self._ports:
-            ser_ports.append(port.serialize())
-        return {"vlan":self.vlan_no, "ports":ser_ports}
+        serports = []
+        for port in self.ports:
+            serports.append(port.serialize())
+        return {"vlan":self.vlan_no, "ports":serports}
 
     def deserialize(self, ser_object):
         '''Digest data read from JSON'''
         self.vlan_no = ser_object["vlan_id"]
-        self._ports = []
+        self._p_by_name = {}
         for serport in ser_object["ports"]:
             port = SwitchPort(self._bess, self, serport)
-            self._ports.append(port)
+            self._p_by_name[port.ifname] = port
 
     def _create(self):
         '''Create the underlying Linux Bridge'''
@@ -66,12 +69,26 @@ class Vlan(object):
         self._initialized = True
         logging.debug("Init VLAN %s", self.vlan_no)
         self._create()
-        for port in self._ports:
+        for port in self.ports:
             port.initialize()
-            self._add_if(port.port_name)
+            self._add_if(port.ifname)
         self._link("up")
 
-    def update_fdb(self, changes):
-        '''Synchronize VLAN Forwarding State'''
-        for port in self._ports:
-            port.update_fdb(changes)
+    def refresh(self, entry):
+        '''Update an entry (do nothing for now)'''
+        pass
+
+    def delete(self, entry):
+        '''Delete an entry'''
+        for port in self.ports:
+            port.delete(entry)
+
+    def replace(self, entry):
+        '''Replace an entry'''
+        for port in self.ports:
+            port.replace(entry)
+
+    def add(self, entry):
+        '''Add an entry'''
+        for port in self.ports:
+            port.add(entry)

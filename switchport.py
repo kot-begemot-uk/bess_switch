@@ -25,7 +25,6 @@ class SwitchPort(object):
         self._logical_port = None
         self._replicators = []
         self._initialized = False
-        self._active_fdb = {}
         self._pg_map = {}
 
     @property
@@ -54,7 +53,7 @@ class SwitchPort(object):
             return [0]
 
     @property
-    def port_name(self):
+    def ifname(self):
         '''Return assigned or build default port name'''
         return "bv{}p{}".format(self._vlan.vlan_no, self._args["port_no"])
 
@@ -62,7 +61,7 @@ class SwitchPort(object):
         '''Return the expected out port or None if it is not a BESS port'''
         try:
             out_port = "houtbv{}p{}".format(self._vlan.vlan_no, PORT_RE.match(port).group(2))
-            if out_port == "hout{}".format(self.port_name):
+            if out_port == "hout{}".format(self.ifname):
                 return None # do not loop traffic
             return out_port
         except TypeError:
@@ -79,9 +78,9 @@ class SwitchPort(object):
             return None
         maxgate = max(self._pg_map.values()) + 1
         self._pg_map[port] = maxgate
-        logging.debug("Wiring %s to gate %d on port %s", port, maxgate, self.port_name)
+        logging.debug("Wiring %s to gate %d on port %s", port, maxgate, self.ifname)
         self._bess.connect_modules(
-            "f{}".format(self.port_name), hout_port, ogate=maxgate)
+            "f{}".format(self.ifname), hout_port, ogate=maxgate)
         return maxgate
 
     def _p_to_g(self, port):
@@ -106,28 +105,28 @@ class SwitchPort(object):
         self._initialized = True
         # we are using only PCI Ids for now.
         if self._pci_id is not None:
-            logging.debug("Phys Port for %s", self.port_name)
+            logging.debug("Phys Port for %s", self.ifname)
             self._phys_port = self._bess.create_port(
-                "PMDPort", "h{}".format(self.port_name),
+                "PMDPort", "h{}".format(self.ifname),
                 {"pci":self._pci_id, "num_inc_q":self._inc_q, "num_out_q":self._out_q})
-        if self.port_name is not None:
-            logging.debug("Logical Port for %s", self.port_name)
+        if self.ifname is not None:
+            logging.debug("Logical Port for %s", self.ifname)
             self._logical_port = self._bess.create_port(
-                "VPort", "v{}".format(self.port_name),
-                {"ifname":self.port_name, "rxq_cpus":self._cpu_set})
+                "VPort", "v{}".format(self.ifname),
+                {"ifname":self.ifname, "rxq_cpus":self._cpu_set})
 
         if self._phys_port is not None:
-            logging.debug("Pipeline for %s", self.port_name)
+            logging.debug("Pipeline for %s", self.ifname)
             p_in = self._bess.create_module(
-                "PortInc", "hin{}".format(self.port_name), {"port": "h{}".format(self.port_name)})
+                "PortInc", "hin{}".format(self.ifname), {"port": "h{}".format(self.ifname)})
             p_out = self._bess.create_module(
-                "PortOut", "hout{}".format(self.port_name), {"port": "h{}".format(self.port_name)})
+                "PortOut", "hout{}".format(self.ifname), {"port": "h{}".format(self.ifname)})
             v_in = self._bess.create_module(
-                "PortInc", "vin{}".format(self.port_name), {"port": "v{}".format(self.port_name)})
+                "PortInc", "vin{}".format(self.ifname), {"port": "v{}".format(self.ifname)})
             v_out = self._bess.create_module(
-                "PortOut", "vout{}".format(self.port_name), {"port": "v{}".format(self.port_name)})
+                "PortOut", "vout{}".format(self.ifname), {"port": "v{}".format(self.ifname)})
             forwarder = self._bess.create_module(
-                "L2Forward", "f{}".format(self.port_name), {"source_check": True})
+                "L2Forward", "f{}".format(self.ifname), {"source_check": True})
 
             self._bess.run_module_command(
                 forwarder.name,
@@ -144,7 +143,7 @@ class SwitchPort(object):
         '''Del MAC-GATE Rules'''
         if mac_list:
             self._bess.run_module_command(
-                "f{}".format(self.port_name),
+                "f{}".format(self.ifname),
                 "delete",
                 "L2ForwardCommandDeleteArg",
                 {"addrs":mac_list})
@@ -153,65 +152,52 @@ class SwitchPort(object):
         '''Add MAC-GATE Rules'''
         if entries:
             self._bess.run_module_command(
-                "f{}".format(self.port_name),
+                "f{}".format(self.ifname),
                 "add",
                 "L2ForwardCommandAddArg",
                 {"entries":entries})
 
-    def _slow_del(self, entries):
-        '''Slow addition, one entry at a time to fix inconsistencies
-           in the fdb'''
-        for entry in entries:
-            logging.debug("Slow deletion for %s", entry)
-            try:
-                self._del_rules(entry)
-            except:
-                pass
+    def refresh(self, change):
+        '''As we do not have counters yet, a refresh is a pass'''
+        pass
 
-    def _slow_add(self, entries):
-        '''Slow addition, one entry at a time to fix inconsistencies
-           in the fdb'''
-        for entry in entries:
-            logging.debug("Slow addition for %s", entry)
-            try:
-                self._del_rules([entry["addr"]])
-            except:
-                pass
-            try:
-                self._add_rules([entry])
-            except:
-                logging.error("Slow addition for %s failed", entry)
 
-    def update_fdb(self, changes):
-        '''Apply Forwarding Database rules'''
-        to_del = []
+    def add(self, change):
+        '''Add a MAC route from fdb, fdb now splits them into
+           single entry commands so we do not do bulking any more'''
+        if change.source == self:
+            return
         to_add = []
-
-        logging.debug("Got requests on port %s %s", self.port_name, changes)
-
-        for (oper, port, mac) in changes:
-            if oper == 'RTM_NEWNEIGH' and port != self:
-                p_g = self._p_to_g(port.port_name)
-                if p_g is not None:
-                    to_add.append({"addr":mac, "gate":p_g})
-            if oper == 'RTM_NEWNEIGH' and port == self:
-                 to_del.append(mac) # Mac has jumped, we must delete our entry if exists
-                
-            if oper == 'RTM_DELNEIGH':
-                p_g = self._p_to_g(port.port_name)
-                if p_g is not None:
-                    to_del.append(mac)
-        try:
-            if to_del:
-                logging.debug("Deleting on %s %s", self.port_name, to_del)
-                self._del_rules(to_del)
-        except:
-            self._slow_del(to_del)
-                
-            
+        p_g = self._p_to_g(change.source.ifname)
+        if p_g is not None:
+            to_add.append({"addr":change.mac, "gate":p_g})
         try:
             if to_add:
-                logging.debug("Adding on %s %s", self.port_name, to_add)
+                logging.debug("Adding on %s %s", self.ifname, to_add)
                 self._add_rules(to_add)
+        # the exceptions barfed by the grpc stack are anything but "well defined"
+        # pylint: disable=bare-except
         except:
-            self._slow_add(to_add)
+            logging.error("Add failed on %s %s", self.ifname, to_add)
+
+    def delete(self, change):
+        '''Add a MAC route from fdb, fdb now splits them into
+           single entry commands so we do not do bulking any more'''
+        # we do not do not skip a deletion request even if the dest
+        # port is ourselves. The reason for this is that in case of a
+        # port move the new port may be ourselves, the old one is a
+        # different port for which we need to delete the routing entry
+        to_del = [change.mac]
+        try:
+            logging.debug("Deleting on %s %s", self.ifname, to_del)
+            self._del_rules(to_del)
+        # the exceptions barfed by the grpc stack are anything but "well defined"
+        # pylint: disable=bare-except
+        except:
+            logging.error("Delete failed on %s %s", self.ifname, to_del)
+
+    def replace(self, change):
+        '''Add a MAC route from fdb, fdb now splits them into
+           single entry commands so we do not do bulking any more'''
+        self.delete(change)
+        self.add(change)
