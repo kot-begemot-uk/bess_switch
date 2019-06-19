@@ -13,7 +13,7 @@ from pybess.bess import BESS
 from fdb import FDB
 from netlink_listener import NetlinkFeed
 from vlan import Vlan
-from select import EPOLLIN
+from select import epoll
 
 class Switch(object):
     '''A python representation of a BESS vlan'''
@@ -24,8 +24,11 @@ class Switch(object):
         self._ifindexes = {}
         self._initialized = False
         self._fdb = FDB()
+        self._epfd = epoll()
+        self._feeds = {}
         self._nl = NetlinkFeed()
-
+        self._feeds[self._nl.fileno()] = self._nl
+        
     def deserialize(self, config):
         '''Digest data read from JSON'''
         for vlan_config in config["vlans"]:
@@ -46,18 +49,27 @@ class Switch(object):
 
     def main_loop(self):
         '''Main processing loop'''
-        for mess in self._nl.initial_read():
-            logging.debug("Initial %s", mess)
-            if mess["type"] == "RTM_NEWNEIGH":
-                self._fdb.learn(
-                    mess["mac"], self._ifindexes[mess["bridge"]], self._ifindexes[mess["port"]])
-        while True:
-            for mess in self._nl.iteration():
-                vlan = self._ifindexes[mess["bridge"]]
+        for feed in self._feeds.values():
+            for mess in feed.initial_read():
+                logging.debug("Initial %s", mess)
                 if mess["type"] == "RTM_NEWNEIGH":
-                    self._fdb.learn(mess["mac"], vlan, self._ifindexes[mess["port"]])
-                elif mess["type"] == "RTM_DELNEIGH":
-                    self._fdb.expire(mess["mac"], vlan)
+                    self._fdb.learn(
+                        mess["mac"], self._ifindexes[mess["bridge"]], self._ifindexes[mess["port"]])
+            feed.setblocking(0)
+            self._epfd.register(feed.fileno())
+        while True:
+            events = self._epfd.poll(1.0)
+            for (file_d, mask) in events:
+                feed = self._feeds[file_d]
+                try:
+                    for mess in feed.iteration():
+                        vlan = self._ifindexes[mess["bridge"]]
+                        if mess["type"] == "RTM_NEWNEIGH":
+                            self._fdb.learn(mess["mac"], vlan, self._ifindexes[mess["port"]])
+                        elif mess["type"] == "RTM_DELNEIGH":
+                            self._fdb.expire(mess["mac"], vlan)
+                except TypeError:
+                    pass
 
 def main():
     '''Main Subroutine'''

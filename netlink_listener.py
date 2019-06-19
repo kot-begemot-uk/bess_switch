@@ -8,6 +8,7 @@
 
 import logging
 import time
+import socket
 from pyroute2 import IPRoute
 from pyroute2.config import AF_BRIDGE
 
@@ -35,7 +36,14 @@ class NetlinkFeed(object):
                 if attr == 'IFLA_IFNAME':
                     self._index_to_name[index] = value
                     break
+
+    def fileno(self):
+        '''File descriptor for epoll loop'''
+        return self._ipr.fileno()
         
+    def setblocking(self, arg):
+        '''Set blocking/non-blocking'''
+        return self._ipr.setblocking(arg)
 
     def _parse(self, mess):
         '''Parse a Bridge Netlink message'''
@@ -69,7 +77,10 @@ class NetlinkFeed(object):
     def iteration(self):
         '''Handle Netlink messages'''
         execute = []
-        messages = self._ipr.get()
+        try:
+            messages = self._ipr.get()
+        except socket.error:
+            return
         for mess in messages:
             try:
                 if mess["family"] == AF_BRIDGE and (mess["state"] & NUD_MASK):
