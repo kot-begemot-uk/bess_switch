@@ -10,52 +10,54 @@ import logging
 import json
 from argparse import ArgumentParser
 from pybess.bess import BESS
-from netlink_listener import FDB
+from fdb import FDB
+from netlink_listener import NetlinkFeed
 from vlan import Vlan
+from select import EPOLLIN
 
 class Switch(object):
     '''A python representation of a BESS vlan'''
 
     def __init__(self, bess):
         self._bess = bess
-        self._vlans = []
+        self._vlans = {}
         self._ifindexes = {}
         self._initialized = False
         self._fdb = FDB()
+        self._nl = NetlinkFeed()
 
     def deserialize(self, config):
         '''Digest data read from JSON'''
         for vlan_config in config["vlans"]:
             vlan = Vlan(self._bess, vlan_config)
-            self._vlans.append(vlan)
+            self._vlans[vlan.ifname] = vlan
 
     def initialize(self):
         '''Create underlying VLAN and BESS port'''
         try:
             self._initialized = True
-            for vlan in self._vlans:
+            for vlan in self._vlans.values():
                 vlan.initialize()
-                self._ifindexes[self._fdb.lookup(vlan.ifname())] = vlan
-                for port in vlan.ports():
-                    self._ifindexes[self._fdb.lookup(port.port_name)] = port
+                self._ifindexes[self._nl.lookup_by_name(vlan.ifname())] = vlan
+                for port in vlan.ports:
+                    self._ifindexes[self._nl.lookup_by_name(port.ifname)] = port
         except IOError:
             self._initialized = False
 
     def main_loop(self):
-        '''Netlink listener loop'''
-        messages = self._fdb.initial_read()
+        '''Main processing loop'''
+        for mess in self._nl.initial_read():
+            logging.debug("Initial %s", mess)
+            if mess["type"] == "RTM_NEWNEIGH":
+                self._fdb.learn(
+                    mess["mac"], self._ifindexes[mess["bridge"]], self._ifindexes[mess["port"]])
         while True:
-            req_queue = {}
-            for (event, vindex, data) in messages:
-                target_vlan = self._ifindexes[vindex]
-                try:
-                    req_queue[target_vlan].append((event, self._ifindexes[data['port']], data['addr']))
-                except KeyError:
-                    req_queue[target_vlan] = [(event, self._ifindexes[data['port']], data['addr'])]
-            for (vlan, changes) in  req_queue.items():
-                vlan.update_fdb(changes)
-
-            messages = self._fdb.iteration()
+            for mess in self._nl.iteration():
+                vlan = self._ifindexes[mess["bridge"]]
+                if mess["type"] == "RTM_NEWNEIGH":
+                    self._fdb.learn(mess["mac"], vlan, self._ifindexes[mess["port"]])
+                elif mess["type"] == "RTM_DELNEIGH":
+                    self._fdb.expire(mess["mac"], vlan)
 
 def main():
     '''Main Subroutine'''
