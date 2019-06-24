@@ -18,9 +18,11 @@ class Vlan(object):
         self._bess = bess
         self._p_by_name = {}
         self._initialized = False
+        # list of "port sets" which we use for group mappings
         if config is not None:
             self.deserialize(config)
 
+    @property
     def ifname(self):
         '''Build default interface name'''
         return "bvlan{}".format(self.vlan_no)
@@ -29,6 +31,11 @@ class Vlan(object):
     def ports(self):
         '''Accessor for port list'''
         return self._p_by_name.values()
+
+    @property
+    def port_names(self):
+        '''Accessor for port list'''
+        return self._p_by_name.keys()
 
     def port_by_name(self, name):
         '''Return port by its name'''
@@ -51,27 +58,33 @@ class Vlan(object):
 
     def _create(self):
         '''Create the underlying Linux Bridge'''
-        logging.debug("Creatig Bridge %s", self.ifname())
-        subprocess.call(["/sbin/brctl", "addbr", self.ifname()])
+        logging.debug("Creatig Bridge %s", self.ifname)
+        subprocess.call(["/sbin/brctl", "addbr", self.ifname])
 
     def _add_if(self, ifname):
         '''Create the underlying Linux Bridge'''
-        logging.debug("Adding interface %s to Bridge %s", ifname, self.ifname())
-        subprocess.call(["/sbin/brctl", "addif", self.ifname(), ifname])
+        logging.debug("Adding interface %s to Bridge %s", ifname, self.ifname)
+        subprocess.call(["/sbin/brctl", "addif", self.ifname, ifname])
 
     def _link(self, status):
         '''Up/Down Link'''
         logging.debug("Linkf for VLAN %s %s", self.vlan_no, status)
-        subprocess.call(["/sbin/ip", "link", "set", self.ifname(), status])
+        subprocess.call(["/sbin/ip", "link", "set", self.ifname, status])
 
     def initialize(self):
         '''Create underlying VLAN and BESS port'''
         self._initialized = True
         logging.debug("Init VLAN %s", self.vlan_no)
         self._create()
+        port_names = []
+        for port in self.ports:
+            port_names.append(port.ifname)
         for port in self.ports:
             port.initialize()
             self._add_if(port.ifname)
+        # add default replicator for broadcast/multicast to all
+        for port in self.ports:
+            port.replicator(port_names)
         self._link("up")
 
     def refresh(self, entry):

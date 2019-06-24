@@ -8,6 +8,7 @@
 
 import logging
 import re
+import copy
 
 PORT_RE = re.compile(r"bv(\d+)p(\d+)")
 
@@ -23,7 +24,7 @@ class SwitchPort(object):
         logging.debug("Port Args are %s", args)
         self._phys_port = None
         self._logical_port = None
-        self._replicators = []
+        self._replicators = {}
         self._initialized = False
         self._pg_map = {}
 
@@ -56,6 +57,54 @@ class SwitchPort(object):
     def ifname(self):
         '''Return assigned or build default port name'''
         return "bv{}p{}".format(self._vlan.vlan_no, self._args["port_no"])
+
+
+    def replicator(self, port_list_arg):
+        '''Add a list of replicators'''
+        port_list = copy.copy(port_list_arg)
+        try:
+            port_list.remove(self.ifname)
+        except ValueError:
+            pass
+        if len(port_list) == 0:
+            return
+        logging.debug("Stargate SG1 on %s %s", self.ifname, port_list)
+        hash_key = "-".join(sorted(port_list))
+        try:
+            if self._replicators[hash_key]:
+                return "rep{}-{}".format(self.ifname, hash_key)
+        except KeyError:
+            pass
+        logging.debug("Replicate  %s %s", self.ifname, port_list)
+        self._bess.create_module(
+            "Replicate", "rep{}-{}".format(self.ifname, hash_key), {"gates":[]})
+        self._replicators[hash_key] = True
+        self._bess.resume_all()
+
+        # run all args via the gate mapper and reuse the gate mapping
+        logging.debug("Dry run for  %s %s", self.ifname, port_list)
+        for port_name in port_list:
+            self._p_to_g(port_name)
+        gate_list = []
+        # wire all gates using the same gate mapping as the L2Forwarder
+        for port_name in port_list:
+            try:
+                hout = self._hout_port(port_name)
+                if hout is not None:
+                    self._bess.connect_modules(
+                        "rep{}-{}".format(
+                            self.ifname, hash_key), hout, ogate=self._pg_map[port_name])
+                    gate_list.append(self._pg_map[port_name])
+            except KeyError:
+                pass
+        # Set the gates as an arg
+        logging.debug("Gate address  %s %s", self.ifname, port_list)
+        self._bess.run_module_command(
+            "rep{}-{}".format(self.ifname, hash_key),
+            "set_gates",
+            "ReplicateCommandSetGatesArg",
+            {"gates":gate_list})
+        return "rep{}-{}".format(self.ifname, hash_key)
 
     def _hout_port(self, port):
         '''Return the expected out port or None if it is not a BESS port'''
@@ -91,6 +140,36 @@ class SwitchPort(object):
             return self._pg_map[port]
         except KeyError:
             return self._add_portgate(port)
+
+    def _add_mcastgate(self, replicator):
+        '''Add a new gate for the multicast replicator'''
+        maxgate = max(self._pg_map.values()) + 1
+        self._pg_map[replicator] = maxgate
+        logging.debug("Wiring %s to gate %d on port %s", replicator, maxgate, self.ifname)
+        self._bess.connect_modules(
+            "f{}".format(self.ifname), replicator, ogate=maxgate)
+        return maxgate
+
+
+    def _m_to_g(self, ports_arg):
+        '''Map multicast group to forwarding locally significant forwarding gate'''
+        ports = copy.copy(ports_arg)
+        if ports is None:
+            return None
+        try:
+            ports.remove(self.ifname)
+        except ValueError:
+            pass
+
+        if len(ports) == 0:
+            return
+
+        logging.debug("Mapping multicast gate on %s for %s", self.ifname, ports)
+            
+        try:
+            return self._pg_map[self.replicator(ports)]
+        except KeyError:
+            return self._add_mcastgate(self.replicator(ports))
 
     def serialize(self):
         '''Prep the port for json store'''
@@ -168,7 +247,12 @@ class SwitchPort(object):
         if change.source == self:
             return
         to_add = []
-        p_g = self._p_to_g(change.source.ifname)
+        p_g = None
+        if change.is_broadcast:
+            logging.debug("Add requested for %s %s", self.ifname, change.ports)
+            p_g = self._m_to_g(change.ports)
+        else:
+            p_g = self._p_to_g(change.source.ifname)
         if p_g is not None:
             to_add.append({"addr":change.mac, "gate":p_g})
         try:

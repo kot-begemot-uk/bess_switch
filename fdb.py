@@ -14,12 +14,12 @@ DEFAULT_AGE = 300
 
 class FDBEntry(object):
     '''FDB Entry'''
+    def __init__(self, mac, vlan, source, dst_ports=None, age=DEFAULT_AGE):
     # pylint: disable=too-many-instance-attributes
     # pylint: disable=too-many-arguments
-    def __init__(self, mac, vlan, source, dst_port=None, age=DEFAULT_AGE):
         self._mac = mac
         self._source = source
-        self._dst_port = dst_port
+        self._dst_ports = dst_ports
         self._is_broadcast = is_bmcast(mac)
         self._vlan = vlan
         self._age = age
@@ -27,10 +27,9 @@ class FDBEntry(object):
         self.refresh()
 
     @property
-    def port(self):
-        '''Port to direct traffic to. A MCAST Group is treated as a
-           Port for traffic routing purposes'''
-        return self._dst_port
+    def ports(self):
+        '''Port list to direct traffic to.'''
+        return self._dst_ports
 
     @property
     def mac(self):
@@ -57,6 +56,22 @@ class FDBEntry(object):
         self.last_seen = time.time()
         self._expiry = self.last_seen + self._age
 
+    def add_port(self, dst_port):
+        '''Add a dst port'''
+        try:
+            self._dst_ports.index(dst_port)
+        except ValueError:
+            self._dst_ports.append(dst_port)
+
+    def del_port(self, dst_port):
+        '''Add a dst port'''
+        try:
+            self._dst_ports.remove(dst_port)
+        except ValueError:
+            pass
+
+    
+
 class FDB(object):
     '''A python representation of the linux bridge forwarding
        database. By default reads from sysfs and expects a linux
@@ -82,6 +97,32 @@ class FDB(object):
            present on any number of vlans, thus you need to hash
            on mac + vlan'''
         del self._records["{}-{}".format(entry.vlan, entry.mac)]
+
+    def add_mcast(self, mac, vlan, dest_ports):
+        '''Add a Multicast fdb entry'''
+        try:
+            old = self.get_entry(mac, vlan)
+            if len(dest_ports) == 0:
+                self.delete_entry(old)
+                vlan.delete(old)
+                return
+            try:
+                for port in dest_ports:
+                    old.ports.index(port)
+                for port in old.ports:
+                    dest_ports.index(port)
+                old.refresh()
+                vlan.refresh(old)
+                return
+            except ValueError:
+                self.delete_entry(old)
+                new = FDBEntry(mac, vlan, None, dst_ports=dest_ports)
+                self.add_entry(new)
+                vlan.replace(old, new)
+        except KeyError:
+            entry = FDBEntry(mac, vlan, None, dst_ports=dest_ports)
+            self.add_entry(entry)
+            vlan.add(entry)
 
     def learn(self, mac, vlan, source_port):
         '''Add or refresh a mac'''
