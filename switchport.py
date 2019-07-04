@@ -9,6 +9,7 @@
 import logging
 import re
 import copy
+from igmp_listener import IGMPFeed
 
 PORT_RE = re.compile(r"bv(\d+)p(\d+)")
 
@@ -21,12 +22,17 @@ class SwitchPort(object):
         self._bess = bess
         self._vlan = vlan
         self._args = args
+        self.snoopfeed = None
         logging.debug("Port Args are %s", args)
         self._phys_port = None
         self._logical_port = None
         self._replicators = {}
         self._initialized = False
         self._pg_map = {}
+
+    def __repr__(self):
+        '''Official representation'''
+        return "Switchport: {}".format(self.ifname)
 
     @property
     def _pci_id(self):
@@ -61,19 +67,24 @@ class SwitchPort(object):
 
     def replicator(self, port_list_arg):
         '''Add a list of replicators'''
-        port_list = copy.copy(port_list_arg)
+        port_list = []
+        for port in port_list_arg:
+            port_list.append(port.ifname)
         try:
             port_list.remove(self.ifname)
         except ValueError:
             pass
-        if len(port_list) == 0:
-            return
+        if not port_list:
+            return None
         logging.debug("Stargate SG1 on %s %s", self.ifname, port_list)
         hash_key = "-".join(sorted(port_list))
+        logging.debug("Hash key is %s", hash_key)
         try:
             if self._replicators[hash_key]:
+                logging.debug("Reusing existing replicator for %s %s", self.ifname, port_list)
                 return "rep{}-{}".format(self.ifname, hash_key)
         except KeyError:
+            logging.debug("New Replicator")
             pass
         logging.debug("Replicate  %s %s", self.ifname, port_list)
         self._bess.create_module(
@@ -143,6 +154,9 @@ class SwitchPort(object):
 
     def _add_mcastgate(self, replicator):
         '''Add a new gate for the multicast replicator'''
+        if replicator is None:
+            return None
+        logging.debug("Gate list is %s", self._pg_map.values())
         maxgate = max(self._pg_map.values()) + 1
         self._pg_map[replicator] = maxgate
         logging.debug("Wiring %s to gate %d on port %s", replicator, maxgate, self.ifname)
@@ -161,11 +175,11 @@ class SwitchPort(object):
         except ValueError:
             pass
 
-        if len(ports) == 0:
-            return
+        if not ports:
+            return None
 
         logging.debug("Mapping multicast gate on %s for %s", self.ifname, ports)
-            
+
         try:
             return self._pg_map[self.replicator(ports)]
         except KeyError:
@@ -194,16 +208,33 @@ class SwitchPort(object):
                 "VPort", "v{}".format(self.ifname),
                 {"ifname":self.ifname, "rxq_cpus":self._cpu_set})
 
+
         if self._phys_port is not None:
             logging.debug("Pipeline for %s", self.ifname)
+
+
+            self._bess.create_port(
+                "UnixSocketPort", "pu{}".format(self.ifname),
+                {"path":"/var/tmp/bess-u{}".format(self.ifname)})
+
+            snoop_out = self._bess.create_module(
+                "PortOut", "uout{}".format(self.ifname), {"port": "pu{}".format(self.ifname)})
+            snoop_in = self._bess.create_module(
+                "PortInc", "uinc{}".format(self.ifname), {"port": "pu{}".format(self.ifname)})
+            b_in = self._bess.create_module(
+                "BPF", "bin{}".format(self.ifname),
+                {"filters":[{"priority": 1, "filter":"proto 2", "gate":1}]})
+
             p_in = self._bess.create_module(
                 "PortInc", "hin{}".format(self.ifname), {"port": "h{}".format(self.ifname)})
             p_out = self._bess.create_module(
                 "PortOut", "hout{}".format(self.ifname), {"port": "h{}".format(self.ifname)})
+
             v_in = self._bess.create_module(
                 "PortInc", "vin{}".format(self.ifname), {"port": "v{}".format(self.ifname)})
             v_out = self._bess.create_module(
                 "PortOut", "vout{}".format(self.ifname), {"port": "v{}".format(self.ifname)})
+
             forwarder = self._bess.create_module(
                 "L2Forward", "f{}".format(self.ifname), {"source_check": True})
 
@@ -213,9 +244,27 @@ class SwitchPort(object):
                 "L2ForwardCommandSetDefaultGateArg",
                 {"gate":0})
             self._pg_map[-1] = 0 # default gate
+
+            # all traffic to forwarder
             self._bess.connect_modules(p_in.name, forwarder.name)
-            self._bess.connect_modules(forwarder.name, v_out.name, ogate=0)
+
+            # make bpf "snoop" filter default output for forwarder (fast path bypasses it)
+            self._bess.connect_modules(forwarder.name, b_in.name, ogate=0)
+
+            # make bpf skip go to underlying linux bridge slow path
+            self._bess.connect_modules(b_in.name, v_out.name, ogate=0)
+
+            # make snoop output go to unix domain monitor port
+            self._bess.connect_modules(b_in.name, snoop_out.name, ogate=1)
+
+            # make traffic returned via snoop to reappear on linux bridge
+            self._bess.connect_modules(snoop_in.name, v_out.name)
+
+            # simple default output - anything out of the underlying linux
+            # bridge just goes out of the door
             self._bess.connect_modules(v_in.name, p_out.name)
+
+            self.snoopfeed = IGMPFeed("/var/tmp/bess-u{}".format(self.ifname), self, self._vlan)
 
 
     def _del_rules(self, mac_list):
@@ -245,11 +294,12 @@ class SwitchPort(object):
         '''Add a MAC route from fdb, fdb now splits them into
            single entry commands so we do not do bulking any more'''
         if change.source == self:
+            logging.debug("Skipping %s %s", self.ifname, change.mac)
             return
         to_add = []
         p_g = None
         if change.is_broadcast:
-            logging.debug("Add requested for %s %s", self.ifname, change.ports)
+            logging.debug("Add requested for %s %s %s", self.ifname, change.mac, change.ports)
             p_g = self._m_to_g(change.ports)
         else:
             p_g = self._p_to_g(change.source.ifname)

@@ -83,8 +83,6 @@ class Vlan(object):
             port.initialize()
             self._add_if(port.ifname)
         # add default replicator for broadcast/multicast to all
-        for port in self.ports:
-            port.replicator(port_names)
         self._link("up")
 
     def refresh(self, entry):

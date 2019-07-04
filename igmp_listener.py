@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 
-'''IGMP Listener'''
+'''BESS IGMP Listener'''
 
 # Copyright (c) 2019 Red Hat Inc
 #
@@ -11,11 +11,9 @@ import socket
 import logging
 import scapy.all as scapy
 from scapy.layers.l2 import Ether
-import pcapy
 
 
 MAXPACKET = 1500
-FILTER = "proto 2"
 MAX_COUNT = 128
 IGMP_CH_INCLUDE = 3 # equivalent of LEAVE if SRC == 0
 IGMP_CH_EXCLUDE = 4 # equivalent of JOIN  if SRC == 0
@@ -24,13 +22,22 @@ IGMP_CH_EXCLUDE = 4 # equivalent of JOIN  if SRC == 0
 class IGMPFeed(object):
     '''IGMP Listener'''
 
-    def __init__(self, iface=None):
+    def __init__(self, upath, iface, bridge=None):
         self.iface = iface
-        self.pcap = pcapy.open_live(iface.encode('ascii'), MAXPACKET, True, 0)
-        self.pcap.setfilter(FILTER)
-        self.pcap.setnonblock(True)
+        self._bridge = bridge
+        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self._socket.connect(upath)
+        self._socket.setblocking(0)
         scapy.load_contrib('igmpv3')
         scapy.load_contrib('igmp')
+
+    def fileno(self):
+        '''Underlying socket fileno'''
+        return self._socket.fileno()
+
+    def setblocking(self, arg):
+        '''Underlying socket fileno'''
+        return self._socket.setblocking(arg)
 
     def _parse(self, packet):
         '''Parse IGMP and other packets we track via pcap. Returns a mix of "learn" events which are the same
@@ -42,21 +49,20 @@ class IGMPFeed(object):
             try:
                 for rec in igmp.fields['records']:
                     for subrec in rec:
-                        print "{}".format(subrec.rtype)
                         if subrec.numsrc == 0 and subrec.rtype == IGMP_CH_INCLUDE:
                                 result.append({
-                                    "type":"leave",
-                                    "iface":self.iface,
+                                    "type":"MCAST_JOIN",
+                                    "port":self.iface,
                                     "mac":convert_to_mac(subrec.maddr),
                                     "group":subrec.maddr,
-                                    "src":packet.src})
+                                    "src":packet.src, "bridge":self._bridge})
                         else:
                                 result.append({
-                                    "type":"join",
-                                    "iface":self.iface,
+                                    "type":"MCAST_LEAVE",
+                                    "port":self.iface,
                                     "mac":convert_to_mac(subrec.maddr),
                                     "group":subrec.maddr,
-                                    "src":packet.src})
+                                    "src":packet.src, "bridge":self._bridge})
                             
             except TypeError: 
                 pass
@@ -66,17 +72,18 @@ class IGMPFeed(object):
         return []
 
     def iteration(self):
-        '''Handle PCAP reads'''
+        '''Handle BESS Socket reads'''
         execute = []
         packets = []
         try:
             count = 0
             while count < MAX_COUNT:
-                (hdr, data) = self.pcap.next()
+                data = self._socket.recv(65535)
                 packets.append(Ether(data))
+                self._socket.send(data)
         except TypeError:
             pass
-        except socket.timeout:
+        except :
             pass
 
         for packet in packets:

@@ -9,12 +9,11 @@
 import logging
 import json
 from argparse import ArgumentParser
+from select import epoll
 from pybess.bess import BESS
 from fdb import FDB
 from netlink_listener import NetlinkFeed
-from mdb_reader import MDBReader
 from vlan import Vlan
-from select import epoll
 
 class Switch(object):
     '''A python representation of a BESS vlan'''
@@ -28,10 +27,8 @@ class Switch(object):
         self._feeds = {}
         self._nl = NetlinkFeed()
         self._feeds[self._nl.fileno()] = self._nl
-        self._mdb = MDBReader()
-        self._feeds[self._mdb.fileno()] = self._mdb
         self._bess = bess
-        
+
     def deserialize(self, config):
         '''Digest data read from JSON'''
         for vlan_config in config["vlans"]:
@@ -47,6 +44,7 @@ class Switch(object):
                 self._ifindexes[self._nl.lookup_by_name(vlan.ifname)] = vlan
                 for port in vlan.ports:
                     self._ifindexes[self._nl.lookup_by_name(port.ifname)] = port
+                    self._feeds[port.snoopfeed.fileno()] = port.snoopfeed
         except IOError:
             self._initialized = False
 
@@ -63,6 +61,7 @@ class Switch(object):
                     self._fdb.learn(
                         mess["mac"], self._ifindexes[mess["bridge"]], self._ifindexes[mess["port"]])
             feed.setblocking(0)
+            logging.error("registering for epoll: %d", feed.fileno())
             self._epfd.register(feed.fileno())
         while True:
             events = self._epfd.poll(0.5)
@@ -70,15 +69,26 @@ class Switch(object):
                 feed = self._feeds[file_d]
                 try:
                     for mess in feed.iteration():
-                        if mess["type"] == "RTM_NEWNEIGH":
-                            self._fdb.learn(mess["mac"], self._by_index(mess["bridge"]), self._by_index(mess["port"]))
-                        elif mess["type"] == "RTM_DELNEIGH":
-                            self._fdb.expire(mess["mac"], self._by_index(mess["bridge"]))
-                        elif mess["type"] == "MDB_UPDATE": # fake mdb update
-                            self._fdb.add_mcast(mess["mac"], self._by_index(mess["bridge"]), self._by_index(mess["bridge"]).port_names)
+                        try:
+                            if mess.get("bridge", None) is None:
+                                mess["bridge"] = self._by_index(mess["bridge_name"])
+                            if mess.get("port", None) is None:
+                                mess["port"] = self._by_index(mess["port_name"])
+                            if mess["type"] == "RTM_NEWNEIGH":
+                                self._fdb.learn(mess["mac"], mess["bridge"], mess["port"])
+                            elif mess["type"] == "RTM_DELNEIGH":
+                                self._fdb.expire(mess["mac"], mess["bridge"])
+                            elif mess["type"] == "MCAST_JOIN":
+                                self._fdb.add_mcast(mess["mac"], mess["bridge"], mess["port"])
+                            elif mess["type"] == "MCAST_LEAVE":
+                                self._fdb.del_mcast(mess["mac"], mess["bridge"], mess["port"])
+                            else:
+                                logging.error("Unrecognized fdb message: %s", mess)
+                        except KeyError:
+                            logging.error("Message parsing failure: %s", mess)
                 except TypeError:
                     pass
-            
+
 def main():
     '''Main Subroutine'''
     aparser = ArgumentParser(description=main.__doc__)

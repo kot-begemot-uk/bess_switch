@@ -70,7 +70,6 @@ class FDBEntry(object):
         except ValueError:
             pass
 
-    
 
 class FDB(object):
     '''A python representation of the linux bridge forwarding
@@ -98,29 +97,35 @@ class FDB(object):
            on mac + vlan'''
         del self._records["{}-{}".format(entry.vlan, entry.mac)]
 
-    def add_mcast(self, mac, vlan, dest_ports):
+    def del_mcast(self, mac, vlan, port):
+        '''Remove a Multicast fdb entry'''
+        try:
+            old = self.get_entry(mac, vlan)
+            try:
+                new = FDBEntry(mac, vlan, None, dst_ports=old.ports)
+                new.ports.remove(port)
+                self.delete_entry(old)
+                self.add_entry(new)
+                vlan.replace(old, new)
+            except ValueError:
+                return
+        except KeyError:
+            pass
+
+    def add_mcast(self, mac, vlan, port):
         '''Add a Multicast fdb entry'''
         try:
             old = self.get_entry(mac, vlan)
-            if len(dest_ports) == 0:
-                self.delete_entry(old)
-                vlan.delete(old)
-                return
             try:
-                for port in dest_ports:
-                    old.ports.index(port)
-                for port in old.ports:
-                    dest_ports.index(port)
-                old.refresh()
-                vlan.refresh(old)
+                old.ports.index(port)
                 return
             except ValueError:
+                new = FDBEntry(mac, vlan, None, dst_ports=old.ports + port)
                 self.delete_entry(old)
-                new = FDBEntry(mac, vlan, None, dst_ports=dest_ports)
                 self.add_entry(new)
                 vlan.replace(old, new)
         except KeyError:
-            entry = FDBEntry(mac, vlan, None, dst_ports=dest_ports)
+            entry = FDBEntry(mac, vlan, None, dst_ports=[port])
             self.add_entry(entry)
             vlan.add(entry)
 
@@ -160,7 +165,7 @@ def is_bmcast(mac):
     if len(digits) != 6:
         raise ValueError
     for digit in digits:
-        hex_form = int(digits[0], 16)
+        hex_form = int(digit, 16)
         if hex_form < 0 or hex_form > 0xff:
             raise ValueError
     return (int(digits[0], 16) & 1) == 1

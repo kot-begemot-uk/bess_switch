@@ -61,7 +61,7 @@ class NetlinkFeed(object):
         if bridge is None or mac is None or port is None:
             logging.error("Failed to parse message %s", mess)
             raise KeyError
-        return {"type":mess["event"], "bridge":bridge, "mac":mac, "port":port}
+        return {"type":mess["event"], "bridge_name":bridge, "mac":mac, "port_name":port}
 
     def initial_read(self):
         '''Read the FDB state at start'''
