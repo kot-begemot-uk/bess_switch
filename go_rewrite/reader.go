@@ -13,6 +13,8 @@ import "time"
 import "github.com/google/gopacket"
 import "github.com/google/gopacket/layers"
 
+const cutoff = 300
+
 type reader struct {
     c  net.Conn
     buffer  []byte
@@ -44,7 +46,7 @@ func (r *reader) processPacket () (int) {
         fmt.Printf("MAC exists: %s %d", eth.SrcMAC, time.Now().Unix() - old)
         r.macs[eth.SrcMAC.String()] = time.Now().Unix()
     } else {
-        if (eth.SrcMAC[0] & 1) > 0 { 
+        if (eth.SrcMAC[0] & 1) > 0 {
             fmt.Printf("Broadcast Mac: %s ", eth.SrcMAC)
         } else {
             fmt.Printf("Add Mac: %s ", eth.SrcMAC)
@@ -53,6 +55,17 @@ func (r *reader) processPacket () (int) {
     }
     if err != nil {
         log.Fatal("Error Reading", err)
+    }
+
+    to_delete := make([]string, 0)
+    for k, v  := range r.macs {
+        if time.Now().Unix() - v > cutoff {
+            to_delete = append(to_delete, k)
+        }
+    }
+    for _, k := range to_delete {
+        fmt.Printf("delete Mac: %s ", k)
+        delete(r.macs, k)
     }
     return count
 }
