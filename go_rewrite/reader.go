@@ -9,6 +9,7 @@ import "os"
 import "fmt"
 import "net"
 import "log"
+import "time"
 import "github.com/google/gopacket"
 import "github.com/google/gopacket/layers"
 
@@ -16,12 +17,14 @@ type reader struct {
     c  net.Conn
     buffer  []byte
     path  string
+    macs map[string]int64
 }
 
 func newReader (pathArg string) (*reader) {
     r := &reader{
 		path: pathArg,
 		buffer: make([]byte, 2048),
+        macs: make(map[string]int64),
     }
     c, err := net.Dial("unixpacket", r.path)
     r.c = c
@@ -37,7 +40,17 @@ func (r *reader) processPacket () (int) {
     packet := gopacket.NewPacket(r.buffer, layers.LayerTypeEthernet, gopacket.Default)
     ethLayer := packet.Layer(layers.LayerTypeEthernet)
     eth := ethLayer.(*layers.Ethernet)
-    fmt.Printf("MAC is: %s ", eth.SrcMAC)
+    if old, ok := r.macs[eth.SrcMAC.String()]; ok {
+        fmt.Printf("MAC exists: %s %d", eth.SrcMAC, time.Now().Unix() - old)
+        r.macs[eth.SrcMAC.String()] = time.Now().Unix()
+    } else {
+        if (eth.SrcMAC[0] & 1) > 0 { 
+            fmt.Printf("Broadcast Mac: %s ", eth.SrcMAC)
+        } else {
+            fmt.Printf("Add Mac: %s ", eth.SrcMAC)
+            r.macs[eth.SrcMAC.String()] = time.Now().Unix()
+        }
+    }
     if err != nil {
         log.Fatal("Error Reading", err)
     }
