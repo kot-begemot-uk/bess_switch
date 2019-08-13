@@ -3,7 +3,7 @@
 //License: GPL2, see COPYING in source directory
 
 
-package Reader
+package reader
 
 import "net"
 import log "github.com/sirupsen/logrus"
