@@ -3,7 +3,7 @@
 //License: GPL2, see COPYING in source directory
 
 
-package reader
+package agent
 
 import "net"
 import log "github.com/sirupsen/logrus"
@@ -16,21 +16,19 @@ const cutoff = 300
 type Reader struct {
     c  net.Conn
     buffer  []byte
+    port string
     path  string
     macs map[string]int64
-    learn chan string
-    expires chan string
-    mcast chan string
+    control chan L2FIBCommand
 }
 
-func NewReader (pathArg string, learnChan chan string, expiresChan chan string, mcastChan chan string) (*Reader) {
+func NewReader (portArg string, pathArg string, controlChan chan L2FIBCommand) (*Reader) {
     r := &Reader{
+        port: portArg,
         path: pathArg,
         macs: make(map[string]int64),
         buffer: make([]byte, 2048),
-        learn: learnChan,
-        expires: expiresChan,
-        mcast: mcastChan,
+        control: controlChan,
     }
     c, err := net.Dial("unixpacket", r.path)
     r.c = c
@@ -40,6 +38,13 @@ func NewReader (pathArg string, learnChan chan string, expiresChan chan string, 
     return r
 }
 
+func (r *Reader) GetControl () (chan L2FIBCommand) {
+    return r.control
+}
+
+func (r *Reader) GetPort () (string) {
+    return r.port
+}
 // This is written to run as a goroutine in blocking mode.
 
 func (r *Reader) ProcessPacket () (int) {
@@ -70,10 +75,17 @@ func (r *Reader) ProcessPacket () (int) {
             // Refresh MAC
             r.macs[mac] = time.Now().Unix()
         } else {
+            command := L2FIBCommand{
+                command: "LEARN",
+                MAC: eth.SrcMAC.String(),
+                permanent: false,
+                setage:  time.Now().Unix(),
+                port: r.port,
+            }
             select {
-                case r.learn <- eth.SrcMAC.String():
+                case r.control <- command:
                     // We cache the Mac only if we have successfully announced it
-                    r.macs[eth.SrcMAC.String()] = time.Now().Unix()
+                    r.macs[eth.SrcMAC.String()] = command.setage
                     log.Debugf("learned mac %s", eth.SrcMAC.String())
                 default:
                     log.Errorf("failed to write learned mac to channel")
@@ -87,8 +99,15 @@ func (r *Reader) ProcessPacket () (int) {
         }
     }
     for _, k := range to_delete {
+        command := L2FIBCommand{
+            command: "EXPIRE",
+            MAC: k,
+            permanent: false,
+            setage:  0,
+            port: r.port,
+        }
         select {
-            case r.expires <- k:
+            case r.control <- command:
                 // Same as expiry, we delete it only if announcement is successful
                 log.Debugf("expired mac %s", k)
                 delete(r.macs, k)
@@ -102,7 +121,14 @@ func (r *Reader) ProcessPacket () (int) {
 func (r *Reader) Run() {
     for true {
         if r.ProcessPacket() <= 0 {
-            r.learn <- "CLOSE"
+            command := L2FIBCommand{
+                command: "CLOSE",
+                MAC: "",
+                permanent: false,
+                setage:  0,
+                port: r.port,
+            }
+            r.control <- command 
             return
         }
     }

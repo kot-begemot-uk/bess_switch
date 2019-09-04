@@ -6,16 +6,18 @@
 package main
 
 import "os"
-import "pipeline"
-import "fib"
+import "agent"
+import "sync"
 
 func main() {
 
-    f := fib.NewFIB("testfib")
+    a := &agent.NimbessAgent{Mu: &sync.Mutex{}, Pipelines: make(map[string]string),}
+    f := agent.NewFIB("testfib", a)
 
     for count := 1; count < len(os.Args); count++ {
-        p := pipeline.NewMockPipeline(os.Args[count])
-        f.AddPort(p)
+        a.Pipelines[os.Args[count]] = os.Args[count]
+        // we add them by hand for now, will change to channel later
+        f.AddPort(os.Args[count])
     }
 
     for true {
